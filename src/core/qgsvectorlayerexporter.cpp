@@ -97,6 +97,11 @@ QgsVectorLayerExporter::QgsVectorLayerExporter( const QString &uri,
       uriUpdated += layerName;
     }
   }
+  else if ( providerKey == QLatin1String( "oracle" ) )
+  {
+    uriUpdated += QLatin1String( " type=" );
+    uriUpdated += QgsWkbTypes::displayString( geometryType );
+  }
 
   QgsDataProvider::ProviderOptions providerOptions;
   QgsVectorDataProvider *vectorProvider = qobject_cast< QgsVectorDataProvider * >( pReg->createProvider( providerKey, uriUpdated, providerOptions ) );

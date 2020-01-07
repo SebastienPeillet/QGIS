@@ -1184,7 +1184,43 @@ bool QgsOracleProvider::isValid() const
 
 QVariant QgsOracleProvider::defaultValue( int fieldId ) const
 {
-  return mDefaultValues.value( fieldId, QVariant() );
+  QString defVal = mDefaultValues.value( fieldId, QString() ).toString();
+
+  if ( providerProperty( EvaluateDefaultValues, false ).toBool() && !defVal.isEmpty() )
+  {
+    QgsField fld = field( fieldId );
+    return evaluateDefaultExpression( defVal, fld.type() );
+  }
+
+  return defVal;
+}
+
+QString QgsOracleProvider::defaultValueClause( int fieldId ) const
+{
+  QString defVal = mDefaultValues.value( fieldId, QString() ).toString();
+
+  if ( !providerProperty( EvaluateDefaultValues, false ).toBool() && !defVal.isEmpty() )
+  {
+    return defVal;
+  }
+
+  return QString();
+}
+
+
+bool QgsOracleProvider::skipConstraintCheck( int fieldIndex, QgsFieldConstraints::Constraint constraint, const QVariant &value ) const
+{
+  Q_UNUSED( constraint );
+  if ( providerProperty( EvaluateDefaultValues, false ).toBool() )
+  {
+    return !mDefaultValues.value( fieldIndex ).toString().isEmpty();
+  }
+  else
+  {
+    // stricter check - if we are evaluating default values only on commit then we can only bypass the check
+    // if the attribute values matches the original default clause
+    return mDefaultValues.value( fieldIndex ) == value.toString() && !value.isNull();
+  }
 }
 
 QVariant QgsOracleProvider::evaluateDefaultExpression( const QString &value, const QVariant::Type &fieldType ) const
@@ -1232,7 +1268,7 @@ bool QgsOracleProvider::addFeatures( QgsFeatureList &flist, QgsFeatureSink::Flag
 
   try
   {
-    QSqlQuery ins( db ), getfid( db );
+    QSqlQuery ins( db ), getfid( db ), identitytype( db );
 
     if ( !conn->begin( db ) )
     {
@@ -1243,7 +1279,6 @@ bool QgsOracleProvider::addFeatures( QgsFeatureList &flist, QgsFeatureSink::Flag
     QString insert = QStringLiteral( "INSERT INTO %1(" ).arg( mQuery );
     QString values = QStringLiteral( ") VALUES (" );
     QString delim;
-    bool primaryKeyTypeInsert = true;
 
     QStringList defaultValues;
     QList<int> fieldId;
@@ -1255,25 +1290,76 @@ bool QgsOracleProvider::addFeatures( QgsFeatureList &flist, QgsFeatureSink::Flag
       delim = ',';
     }
 
+    bool skipSinglePKField = false;
+    bool noPkFeatures = false;
+    QString keys, kdelim;
     QgsAttributes attributevec = flist[0].attributes();
     if ( mPrimaryKeyType == PktInt || mPrimaryKeyType == PktFidMap )
     {
-      QString keys, kdelim;
-
-      const auto constMPrimaryKeyAttrs = mPrimaryKeyAttrs;
-      for ( int idx : constMPrimaryKeyAttrs )
+      if ( mPrimaryKeyAttrs.size() == 1 &&
+           defaultValue( mPrimaryKeyAttrs[0] ).toString().endsWith( "nextval" ) )
       {
+        bool foundNonEmptyPK = false;
+        int idx = mPrimaryKeyAttrs[0];
         QgsField fld = field( idx );
-        if (flist[0].fields().names().contains(fld.name()))
+        noPkFeatures = !flist[0].fields().names().contains( fld.name() );
+        identitytype.prepare( QStringLiteral( "SELECT a.generation_type "
+                                              "FROM all_tab_identity_cols a "
+                                              "WHERE a.owner = '%1' "
+                                              "AND a.table_name = '%2' "
+                                              "AND a.column_name = '%3'" ).arg( mOwnerName ).arg( mTableName ).arg( fld.name() ) );
+        if ( !identitytype.exec() || !identitytype.next() )
         {
-          insert += delim + quotedIdentifier( fld.name() );
-          keys += kdelim + quotedIdentifier( fld.name() );
-          values += delim + '?';
-          delim = ',';
-          kdelim = ',';
-          fieldId << idx;
-          defaultValues << defaultValue( idx ).toString();
-          primaryKeyTypeInsert = false;
+          if ( identitytype.value( 0 ).toString() == "ALWAYS" )
+          {
+            skipSinglePKField = true;
+            keys += quotedIdentifier( fld.name() );
+          }
+        }
+        if ( !skipSinglePKField )
+        {
+          keys += quotedIdentifier( fld.name() );
+          QString defaultPKValue = defaultValue( idx ).toString();
+          for ( int i = 0; i < flist.size(); i++ )
+          {
+            int vidx = flist[i].fields().indexOf( fld.name() );
+            if ( vidx != -1 )
+            {
+              if ( vidx != idx )
+              {
+                idx = vidx;
+              }
+              QgsAttributes attrs2 = flist[i].attributes();
+              QVariant v2 = attrs2.value( idx, QVariant( QVariant::Int ) );
+              // a PK field with a sequence val is auto populate by QGIS with this default
+              // we are only interested in non default values
+              if ( !v2.isNull() && v2.toString() != defaultPKValue )
+              {
+                foundNonEmptyPK = true;
+                break;
+              }
+            }
+          }
+          skipSinglePKField = !foundNonEmptyPK;
+        }
+      }
+
+      if ( !skipSinglePKField )
+      {
+        keys = "";
+        for ( int idx : mPrimaryKeyAttrs )
+        {
+          QgsField fld = field( idx );
+          if ( flist[0].fields().names().contains( fld.name() ) )
+          {
+            insert += delim + quotedIdentifier( fld.name() );
+            keys += kdelim + quotedIdentifier( fld.name() );
+            values += delim + '?';
+            delim = ',';
+            kdelim = ',';
+            fieldId << idx;
+            defaultValues << defaultValue( idx ).toString();
+          }
         }
       }
       if ( !getfid.prepare( QStringLiteral( "SELECT %1 FROM %2 WHERE ROWID=?" ).arg( keys ).arg( mQuery ) ) )
@@ -1284,30 +1370,39 @@ bool QgsOracleProvider::addFeatures( QgsFeatureList &flist, QgsFeatureSink::Flag
 
     // look for unique attribute values to place in statement instead of passing as parameter
     // e.g. for defaults
-    for ( int idx = 0; idx < std::min( attributevec.size(), mAttributeFields.size() ); ++idx )
+    for ( int idx = 0; idx < attributevec.count(); ++idx )
     {
-      QVariant v = attributevec[idx];
-      if ( !v.isValid() )
+      QVariant v = attributevec.value( idx, QVariant( QVariant::Int ) ); // default to NULL for missing attributes
+      if ( skipSinglePKField && idx == mPrimaryKeyAttrs[0] && !noPkFeatures )
+      {
         continue;
-
+      }
       if ( fieldId.contains( idx ) )
-        continue;
-      QgsField fld;
-      if ( !primaryKeyTypeInsert )
       {
-        fld = mAttributeFields.at( idx );
+        continue;
       }
-      else
+      if ( idx + noPkFeatures >= mAttributeFields.count() )
       {
-        fld = mAttributeFields.at( idx+1 );
+        continue;
       }
+      QString fieldname = mAttributeFields.at( idx + noPkFeatures ).name();
+      QString fieldTypeName = mAttributeFields.at( idx + noPkFeatures ).typeName();
 
-      QgsDebugMsgLevel( "Checking field against: " + fld.name(), 4 );
+      QgsDebugMsgLevel( "Checking field against: " + fieldname, 4 );
 
-      if ( fld.name().isEmpty() || fld.name() == mGeometryColumn )
+      if ( fieldname.isEmpty() || fieldname == mGeometryColumn )
         continue;
 
-      insert += delim + quotedIdentifier( fld.name() );
+      int i;
+      for ( i = 1; i < flist.size(); i++ )
+      {
+        QgsAttributes attrs2 = flist[i].attributes();
+        QVariant v2 = attrs2.value( idx, QVariant( QVariant::Int ) ); // default to NULL for missing attributes
+
+        if ( v2 != v )
+          break;
+      }
+      insert += delim + quotedIdentifier( fieldname );
 
       QString defVal = defaultValue( idx ).toString();
 
@@ -1336,7 +1431,6 @@ bool QgsOracleProvider::addFeatures( QgsFeatureList &flist, QgsFeatureSink::Flag
       {
         appendGeomParam( features->geometry(), ins );
       }
-
       for ( int i = 0; i < fieldId.size(); i++ )
       {
         QVariant value = attributevec.value( fieldId[i], QVariant() );
@@ -2365,11 +2459,54 @@ bool QgsOracleProvider::getGeometryDetails()
   if ( !ownerName.isEmpty() )
   {
     if ( exec( qry, QString( "SELECT srid FROM mdsys.all_sdo_geom_metadata WHERE owner=? AND table_name=? AND column_name=?" ),
-               QVariantList() << ownerName << tableName << geomCol ) )
+               QVariantList() << ownerName << tableName.toUpper() << geomCol.toUpper() ) )
     {
       if ( qry.next() )
       {
         detectedSrid = qry.value( 0 ).toInt();
+      }
+      else
+      {
+        if ( exec( qry, QString( "SELECT srid FROM mdsys.user_sdo_geom_metadata WHERE table_name=? AND column_name=?" ),
+                   QVariantList() << tableName.toUpper() << geomCol.toUpper() ) )
+        {
+          if ( qry.next() )
+          {
+            detectedSrid = qry.value( 0 ).toInt();
+          }
+          else
+          {
+            QgsMessageLog::logMessage( tr( "Could not retrieve SRID of %1.\nThe error message from the database was:\n%2.\nSQL: %3" )
+                                       .arg( mQuery )
+                                       .arg( qry.lastError().text() )
+                                       .arg( qry.lastQuery() ), tr( "Oracle" ) );
+          }
+        }
+        else
+        {
+          QgsMessageLog::logMessage( tr( "Could not retrieve SRID of %1.\nThe error message from the database was:\n%2.\nSQL: %3" )
+                                     .arg( mQuery )
+                                     .arg( qry.lastError().text() )
+                                     .arg( qry.lastQuery() ), tr( "Oracle" ) );
+        }
+      }
+    }
+    else
+    {
+      if ( exec( qry, QString( "SELECT srid FROM mdsys.user_sdo_geom_metadata WHERE table_name=? AND column_name=?" ),
+                 QVariantList() << tableName.toUpper() << geomCol.toUpper() ) )
+      {
+        if ( qry.next() )
+        {
+          detectedSrid = qry.value( 0 ).toInt();
+        }
+        else
+        {
+          QgsMessageLog::logMessage( tr( "Could not retrieve SRID of %1.\nThe error message from the database was:\n%2.\nSQL: %3" )
+                                     .arg( mQuery )
+                                     .arg( qry.lastError().text() )
+                                     .arg( qry.lastQuery() ), tr( "Oracle" ) );
+        }
       }
       else
       {
@@ -2378,13 +2515,6 @@ bool QgsOracleProvider::getGeometryDetails()
                                    .arg( qry.lastError().text() )
                                    .arg( qry.lastQuery() ), tr( "Oracle" ) );
       }
-    }
-    else
-    {
-      QgsMessageLog::logMessage( tr( "Could not determine SRID of %1.\nThe error message from the database was:\n%2.\nSQL: %3" )
-                                 .arg( mQuery )
-                                 .arg( qry.lastError().text() )
-                                 .arg( qry.lastQuery() ), tr( "Oracle" ) );
     }
 
     if ( exec( qry, QString( mUseEstimatedMetadata
@@ -2405,6 +2535,12 @@ bool QgsOracleProvider::getGeometryDetails()
         QgsMessageLog::logMessage( tr( "%1 has no valid geometry types.\nSQL: %2" )
                                    .arg( mQuery )
                                    .arg( qry.lastQuery() ), tr( "Oracle" ) );
+        if ( mRequestedGeomType != QgsWkbTypes::Unknown )
+        {
+          detectedType = mRequestedGeomType;
+          QgsMessageLog::logMessage( tr( "Geometry type can't be determined as there is no entry into the table.\n Requested %1 geom type will be used" )
+                                     .arg( mRequestedGeomType ) );
+        }
       }
     }
     else
@@ -2672,7 +2808,6 @@ QgsVectorLayerExporter::ExportError QgsOracleProvider::createEmptyLayer(
   QString &errorMessage,
   const QMap<QString, QVariant> *options )
 {
-  Q_UNUSED( wkbType )
   Q_UNUSED( options )
 
   // populate members from the uri structure
@@ -2737,7 +2872,7 @@ QgsVectorLayerExporter::ExportError QgsOracleProvider::createEmptyLayer(
     }
     else
     {
-        primaryKeyType = QStringLiteral( "number generated by default as identity" );
+      primaryKeyType = QStringLiteral( "number generated by default as identity" );
     }
   }
 
@@ -2786,12 +2921,12 @@ QgsVectorLayerExporter::ExportError QgsOracleProvider::createEmptyLayer(
     }
 
     // create geometry column
-    if ( !geometryColumn.isEmpty())
+    if ( !geometryColumn.isEmpty() )
     {
       sql += QString( "%1%2 MDSYS.SDO_GEOMETRY" ).arg( delim ).arg( quotedIdentifier( geometryColumn ) );
       delim = ",";
     }
-    sql += QString(")");
+    sql += QString( ")" );
     if ( !exec( qry, sql, QVariantList() ) )
     {
       throw OracleException( tr( "Table creation failed." ), qry );
@@ -2821,7 +2956,7 @@ QgsVectorLayerExporter::ExportError QgsOracleProvider::createEmptyLayer(
     if ( parts.size() == 2 )
     {
       // apparently some EPSG codes don't have the auth_name setup in cs_srs
-      if ( !exec( qry, QString( "SELECT srid FROM mdsys.cs_srs WHERE coalesce(auth_name,'EPSG')=? AND auth_srid=?" ),
+      if ( !exec( qry, QString( "SELECT srid FROM mdsys.cs_srs WHERE substr(coalesce(auth_name,'EPSG'),0,4)=? AND auth_srid=?" ),
                   QVariantList() << parts[0] << parts[1] ) )
       {
         throw OracleException( tr( "Could not lookup authid %1:%2" ).arg( parts[0] ).arg( parts[1] ), qry );
@@ -2832,48 +2967,52 @@ QgsVectorLayerExporter::ExportError QgsOracleProvider::createEmptyLayer(
         srid = qry.value( 0 ).toInt();
       }
     }
-    if ( !geometryColumn.isEmpty())
+    if ( !geometryColumn.isEmpty() )
     {
-        if ( srid == 0 )
+      if ( srid == 0 )
+      {
+        QgsDebugMsg( QStringLiteral( "%1:%2 not found in mdsys.cs_srs - trying WKT" ).arg( parts[0] ).arg( parts[1] ) );
+
+        QString wkt = srs.toWkt();
+        if ( !exec( qry, QStringLiteral( "SELECT srid FROM mdsys.cs_srs WHERE wktext=?" ), QVariantList() << wkt ) )
         {
-          QgsDebugMsg( QStringLiteral( "%1:%2 not found in mdsys.cs_srs - trying WKT" ).arg( parts[0] ).arg( parts[1] ) );
-
-          QString wkt = srs.toWkt();
-          if ( !exec( qry, QStringLiteral( "SELECT srid FROM mdsys.cs_srs WHERE wktext=?" ), QVariantList() << wkt ) )
-          {
-            throw OracleException( tr( "Could not lookup WKT." ), qry );
-          }
-
-          if ( qry.next() )
-          {
-            srid = qry.value( 0 ).toInt();
-          }
-          else
-          {
-            if ( !exec( qry, QStringLiteral( "SELECT max(srid)+1 FROM sdo_coord_ref_system" ), QVariantList() ) || !qry.next() )
-            {
-              throw OracleException( tr( "Could not determine new srid." ), qry );
-            }
-
-            srid = qry.value( 0 ).toInt();
-
-            QString sql;
-
-            if ( !exec( qry, QStringLiteral( "INSERT"
-                                             " INTO sdo_coord_ref_system(srid,coord_ref_sys_name,coord_ref_sys_kind,legacy_wktext,is_valid,is_legacy,information_source)"
-                                             " VALUES (?,?,?,?,'TRUE','TRUE','GDAL/OGR via QGIS')" ),
-                        QVariantList() << srid << srs.description() << ( srs.isGeographic() ? "GEOGRAPHIC2D" : "PROJECTED" ) << wkt ) )
-            {
-              throw OracleException( tr( "CRS not found and could not be created." ), qry );
-            }
-          }
+          throw OracleException( tr( "Could not lookup WKT." ), qry );
         }
 
-        if ( !exec( qry, QString( "INSERT INTO mdsys.user_sdo_geom_metadata(table_name,column_name,srid,diminfo) VALUES (?,?,?,?)" ),
-                    QVariantList() << tableName.toUpper() << geometryColumn.toUpper() << srid << diminfo ) )
+        if ( qry.next() )
         {
-          throw OracleException( tr( "Could not insert metadata." ), qry );
+          srid = qry.value( 0 ).toInt();
         }
+        else
+        {
+          if ( !exec( qry, QStringLiteral( "SELECT max(srid)+1 FROM sdo_coord_ref_system" ), QVariantList() ) || !qry.next() )
+          {
+            throw OracleException( tr( "Could not determine new srid." ), qry );
+          }
+
+          srid = qry.value( 0 ).toInt();
+
+          QString sql;
+
+          if ( !exec( qry, QStringLiteral( "INSERT"
+                                           " INTO sdo_coord_ref_system(srid,coord_ref_sys_name,coord_ref_sys_kind,legacy_wktext,is_valid,is_legacy,information_source)"
+                                           " VALUES (?,?,?,?,'TRUE','TRUE','GDAL/OGR via QGIS')" ),
+                      QVariantList() << srid << srs.description() << ( srs.isGeographic() ? "GEOGRAPHIC2D" : "PROJECTED" ) << wkt ) )
+          {
+            throw OracleException( tr( "CRS not found and could not be created." ), qry );
+          }
+        }
+      }
+
+      if ( !exec( qry, QString( "INSERT INTO mdsys.user_sdo_geom_metadata(table_name,column_name,srid,diminfo) VALUES ('%1','%2',%3,%4)" ).arg( tableName.toUpper() ).arg( geometryColumn.toUpper() ).arg( srid ).arg( diminfo ),
+                  QVariantList() ) )
+      {
+        throw OracleException( tr( "Could not insert metadata." ), qry );
+      }
+      else
+      {
+        QgsDebugMsg( QStringLiteral( "Metadata inserted" ) );
+      }
     }
     if ( !conn->commit( db ) )
     {
@@ -2912,6 +3051,10 @@ QgsVectorLayerExporter::ExportError QgsOracleProvider::createEmptyLayer(
 
   // use the provider to edit the table1
   dsUri.setDataSource( ownerName, tableName, geometryColumn, QString(), primaryKey );
+  if ( wkbType != 0 )
+  {
+    dsUri.setWkbType( wkbType );
+  }
 
   QgsDataProvider::ProviderOptions providerOptions;
   QgsOracleProvider *provider = new QgsOracleProvider( dsUri.uri( false ), providerOptions );
