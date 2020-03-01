@@ -323,7 +323,18 @@ QList<QgsMapLayer *> QgsMapThemeCollection::mapThemeVisibleLayers( const QString
     for ( const MapThemeLayerRecord &layerRec : records )
     {
       if ( layerRec.layer() )
-        layers << layerRec.layer();
+      {
+        QString treeParentName = mProject->layerTreeRoot()->findLayer( layerRec.layer()->id() )->parent()->name();
+        bool visible = true;
+        QSet<QString> group = mMapThemes.value( name ).checkedGroupNodes() ;
+        while ( visible && treeParentName != "" )
+        {
+          visible = group.contains( treeParentName );
+          treeParentName = mProject->layerTreeRoot()->findGroup( treeParentName )->parent()->name();
+        }
+        if ( visible )
+          layers << layerRec.layer();
+      }
     }
   }
   else
@@ -335,7 +346,18 @@ QList<QgsMapLayer *> QgsMapThemeCollection::mapThemeVisibleLayers( const QString
       for ( const MapThemeLayerRecord &layerRec : constRecs )
       {
         if ( layerRec.layer() == layer )
-          layers << layerRec.layer();
+        {
+          QString treeParentName = mProject->layerTreeRoot()->findLayer( layer->id() )->parent()->name();
+          bool visible = true;
+          QSet<QString> group = mMapThemes.value( name ).checkedGroupNodes() ;
+          while ( visible && treeParentName != "" )
+          {
+            visible = group.contains( treeParentName );
+            treeParentName = mProject->layerTreeRoot()->findGroup( treeParentName )->parent()->name();
+          }
+          if ( visible )
+            layers << layerRec.layer();
+        }
       }
     }
   }
