@@ -81,25 +81,26 @@ void TestQgsMapThemeCollection::initTestCase()
   ruleC->appendChild( ruleD );
   mPointsLayer->setRenderer( new QgsRuleBasedRenderer( rule0 ) );
 
-  mLayerTree = new QgsLayerTree;
+  // layers need to be in project to be accessible from map themes
+  mProject = new QgsProject;
+  mProject->addMapLayers( QList<QgsMapLayer *>() << mPointsLayer << mPolysLayer << mLinesLayer );
+  mLayerTree = mProject->layerTreeRoot();
   mNodeGroup1 = mLayerTree->addGroup( "group1" );
   mNodeGroup2 = mLayerTree->addGroup( "group2" );
   mNodeGroup3 = mNodeGroup2->addGroup( "group3" );
   mNodeLayerPoints = mNodeGroup1->addLayer( mPointsLayer );
   mNodeLayerLines = mNodeGroup2->addLayer( mLinesLayer );
   mNodeLayerPolys = mNodeGroup3->addLayer( mPolysLayer );
+  // remove layer nodes that were placed at the tree root
+  mLayerTree->removeChildren( 0, 3 );
 
   mLayerTreeModel = new QgsLayerTreeModel( mLayerTree );
-
-  // layers need to be in project to be accessible from map themes
-  mProject = new QgsProject;
-  mProject->addMapLayers( QList<QgsMapLayer *>() << mPointsLayer << mPolysLayer << mLinesLayer );
 }
 
 void TestQgsMapThemeCollection::cleanupTestCase()
 {
   delete mLayerTreeModel;
-  delete mLayerTree;
+  mLayerTree->clear();
   delete mProject;
 
   QgsApplication::exitQgis();
@@ -260,12 +261,14 @@ void TestQgsMapThemeCollection::checkedState()
   QCOMPARE( mNodeGroup3->itemVisibilityChecked(), false );
   QCOMPARE( mNodeLayerLines->itemVisibilityChecked(), false );
   QCOMPARE( mNodeLayerPolys->itemVisibilityChecked(), true );
+  QCOMPARE( themes.mapThemeVisibleLayers( "all-unchecked" ).count(), 0 );
 
   themes.applyTheme( "all-checked", mLayerTree, mLayerTreeModel );
   QCOMPARE( mNodeGroup1->itemVisibilityChecked(), true );
   QCOMPARE( mNodeGroup3->itemVisibilityChecked(), true );
   QCOMPARE( mNodeLayerLines->itemVisibilityChecked(), false );
   QCOMPARE( mNodeLayerPolys->itemVisibilityChecked(), true );
+  QCOMPARE( themes.mapThemeVisibleLayers( "all-checked" ).count(), 1 );
 
   // test read+write
 
