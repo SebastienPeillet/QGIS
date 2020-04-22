@@ -2954,7 +2954,15 @@ QgsLayerTreeGroup *QgsProject::createEmbeddedGroup( const QString &groupName, co
     }
   }
 
-  QgsLayerTreeUtils::setUncheckedGroup( newGroup, uncheckedGroups, 0 );
+  const auto constChildren = newGroup->children();
+  for ( QgsLayerTreeNode *child : constChildren )
+  {
+    if ( QgsLayerTree::isGroup( child ) )
+    {
+      child->resolveReferences( this );
+      child->setItemVisibilityChecked( !uncheckedGroups.contains( QgsLayerTree::toGroup( child )->id() ) );
+    }
+  }
 
   return newGroup;
 }
