@@ -3021,6 +3021,10 @@ bool QgsPostgresProvider::changeAttributeValues( const QgsChangedAttributesMap &
           {
             sql += quotedByteaValue( siter.value() );
           }
+          else if ( siter.value() == defaultValueClause( siter.key() ) )
+          {
+            sql += quotedValue( defaultValue( siter.key() ) );
+          }
           else
           {
             sql += quotedValue( *siter );
