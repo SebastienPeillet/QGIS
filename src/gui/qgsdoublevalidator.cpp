@@ -24,7 +24,7 @@
 
 #include "qgsdoublevalidator.h"
 
-const QString PERMISSIVE_DOUBLE = R"(-?[\d]{0,1000}([\.%1][\d]{0,1000})?(e[+-]?[\d]{0,%2})?)";
+const QString PERMISSIVE_DOUBLE = R"(-?[\d]{0,1000}([\.\%1][\d]{0,%2})?(e[+-]?[\d]{0,1000})?)";
 
 QgsDoubleValidator::QgsDoubleValidator( QObject *parent )
   : QRegularExpressionValidator( parent )

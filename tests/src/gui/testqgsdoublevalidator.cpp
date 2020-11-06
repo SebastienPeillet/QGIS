@@ -59,8 +59,11 @@ void TestQgsDoubleValidator::validate_data()
   QTest::addColumn<QString>( "actualState" );
   QTest::addColumn<int>( "expState" );
 
+  QTest::newRow( "int" ) << QString( "4" ) << int( QValidator::Acceptable );
   QTest::newRow( "C decimal" ) << QString( "4cd6" ) << int( QValidator::Acceptable );
+  QTest::newRow( "negative C decimal" ) << QString( "-4cd6" ) << int( QValidator::Acceptable );
   QTest::newRow( "locale decimal" ) << QString( "4ld6" ) << int( QValidator::Acceptable );
+  QTest::newRow( "negative locale decimal" ) << QString( "-4ld6" ) << int( QValidator::Acceptable );
   QTest::newRow( "locale decimal" ) << QString( "4444ld6" ) << int( QValidator::Acceptable );
 
   // QgsDoubleValidator doesn't expect group separator but it tolerates it,
@@ -70,8 +73,12 @@ void TestQgsDoubleValidator::validate_data()
   QTest::newRow( "c group separator + locale decimal" ) << QString( "4cg444ld6" ) << int( QValidator::Invalid );
   QTest::newRow( "c group separator + c decimal" ) << QString( "4cg444cd6" ) << int( QValidator::Intermediate );
 
-  QTest::newRow( "outside the range + local decimal" ) << QString( "3ld6" ) << int( QValidator::Intermediate );
-  QTest::newRow( "outside the range + c decimal" ) << QString( "3cd6" ) << int( QValidator::Intermediate );
+  QTest::newRow( "outside the range int" ) << QString( "-6" ) << int( QValidator::Intermediate );
+  QTest::newRow( "outside the range int" ) << QString( "11111" ) << int( QValidator::Intermediate );
+  QTest::newRow( "outside the range + local decimal" ) << QString( "11111ld6" ) << int( QValidator::Intermediate );
+  QTest::newRow( "local decimal + too many decimal" ) << QString( "4ld6666" ) << int( QValidator::Intermediate );
+  QTest::newRow( "outside the range + c decimal" ) << QString( "11111cd6" ) << int( QValidator::Intermediate );
+  QTest::newRow( "c decimal + too many decimal" ) << QString( "4cd6666" ) << int( QValidator::Intermediate );
   QTest::newRow( "string" ) << QString( "string" ) << int( QValidator::Invalid );
 
 }
@@ -81,8 +88,11 @@ void TestQgsDoubleValidator::toDouble_data()
   QTest::addColumn<QString>( "actualValue" );
   QTest::addColumn<double>( "expValue" );
 
+  QTest::newRow( "int" ) << QString( "4" ) << double( 4 );
   QTest::newRow( "C decimal" ) << QString( "4cd6" ) << 4.6;
+  QTest::newRow( "negative C decimal" ) << QString( "-4cd6" ) << -4.6;
   QTest::newRow( "locale decimal" ) << QString( "4ld6" ) << 4.6;
+  QTest::newRow( "negative locale decimal" ) << QString( "-4ld6" ) << -4.6;
   QTest::newRow( "locale decimal" ) << QString( "4444ld6" ) << 4444.6;
 
   // QgsDoubleValidator doesn't expect group separator but it tolerates it,
@@ -92,8 +102,14 @@ void TestQgsDoubleValidator::toDouble_data()
   QTest::newRow( "c group separator + locale decimal" ) << QString( "4cg444ld6" ) << 0.0;
   QTest::newRow( "c group separator + c decimal" ) << QString( "4cg444cd6" ) << 4444.6;
 
-  QTest::newRow( "outside the range + local decimal" ) << QString( "3ld6" ) << 3.6;
-  QTest::newRow( "outside the range + c decimal" ) << QString( "3cd6" ) << 3.6;
+  QTest::newRow( "outside the range int" ) << QString( "-6" ) << double( -6 );
+  QTest::newRow( "outside the range int" ) << QString( "-11111" ) << double( -11111 );
+  QTest::newRow( "outside the range + local decimal" ) << QString( "11111ld6" ) << 11111.6;
+  QTest::newRow( "outside the range + local decimal" ) << QString( "-5ld6" ) << -5.6;
+  QTest::newRow( "local decimal + too many decimal" ) << QString( "4ld6666" ) << 4.6666;
+  QTest::newRow( "outside the range + c decimal" ) << QString( "11111ld6" ) << 11111.6;
+  QTest::newRow( "outside the range + c decimal" ) << QString( "-5cd6" ) << -5.6;
+  QTest::newRow( "c decimal + too many decimal" ) << QString( "4cd6666" ) << 4.6666;
   QTest::newRow( "string" ) << QString( "string" ) << 0.0;
 
 }
@@ -101,7 +117,7 @@ void TestQgsDoubleValidator::toDouble_data()
 void TestQgsDoubleValidator::validate()
 {
   QLineEdit *lineEdit = new QLineEdit();
-  QgsDoubleValidator *validator = new QgsDoubleValidator( 4, 10000, lineEdit );
+  QgsDoubleValidator *validator = new QgsDoubleValidator( -5, 10000, 3, lineEdit );
   lineEdit->setValidator( validator );
 
   QFETCH( QString, actualState );
